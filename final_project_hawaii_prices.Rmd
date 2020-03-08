@@ -1,0 +1,239 @@
+---
+title: "Final Project Hawaii"
+author: "Katie B"
+date: "3/4/2020"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Option 4: Point Pattern and Area Analyses of AirBNB Prices in Hawaii
+
+### For the final project, I decided that doing a cost analysis of price-per-night listings would be beneficial for the purpose of researching potential places to stay for my honeymoon in 2021. Before I can jump into the research, I will start by loading and organizing everything necessary for data manipulation.
+```{r}
+# packages for Spatial Point Interpolation
+library(gstat)
+library(maptools)
+
+# packages for Spatial Regression
+library(GWmodel)
+library(RColorBrewer)
+
+# misc. packages I believe may be helpful
+library(ggmap)
+library(jsonlite)
+library(gapminder)
+library(GISTools)
+library(tmap)
+library(tidyverse)
+library(raster)
+library(spatstat)
+library(mapview)
+library(spDataLarge)
+library(ggplot2)
+```
+
+Reading in my listings and GIS data for HI as a points object and polygons object:
+```{r}
+listings <- read.csv(file = "http://data.insideairbnb.com/united-states/hi/hawaii/2020-02-12/visualisations/listings.csv", header = TRUE)
+
+head(listings)
+dim(listings)
+```
+
+I have to choose one room type to analyze, so I'm going to make a filtered dataset with just 'Entire home/apt':
+```{r}
+# It seemed that this was the only portion of the 'filtering' code chunk from HW3 that was applicable here
+listings_homes <- listings %>% filter (listings$room_type == "Entire home/apt")
+
+head(listings_homes)
+dim(listings_homes)
+```
+
+Convert the polygons object into sf object:
+```{r}
+library(sf)
+bnb_hawaii <- st_read("C:/Users/kbaer/Desktop/Katie/Spatial & GIS (Spring A 2020)/neighbourhoods.geojson")
+
+class(bnb_hawaii)
+```
+
+Now convert the polygons object into sp:
+```{r}
+bnb_hawaii <- lwgeom::st_make_valid(bnb_hawaii)
+bnb_hawaii <- as(bnb_hawaii, "Spatial")
+
+class(bnb_hawaii)
+```
+
+In order to set the CRS for my objects, I still need to transform my data points into sp as well:
+```{r}
+### PROF PHAM EXAMPLE SP ###
+coordinates(listings_homes)<-~longitude+latitude
+class(listings_homes)
+```
+
+```{r}
+proj4string(listings_homes)
+proj4string(listings_homes)<-CRS("+init=epsg:4326")
+
+proj4string(listings_homes)
+proj4string(bnb_hawaii)
+
+plot(listings_homes)
+```
+
+### Map all the listings by neighborhood for one room type. I've chosen Entire Homes/Apts for my analysis.
+
+Using basic plot() function:
+```{r}
+par(mar=c(1,1,1,1))
+plot(bnb_hawaii)
+plot(listings_homes, col="red",add=TRUE)
+```
+
+Using tmap() function:
+```{r}
+tm_shape(bnb_hawaii) +
+  tm_borders() +
+tm_shape(listings_homes) +
+  tm_dots(col="red", size = 0.1, shape = 21, alpha = 0.5)
+```
+
+Now I have to put my objects on a projected CRS in order to carry out the rest of the assignment:
+```{r}
+listings_homes_proj <- spTransform(listings_homes, CRS("+init=epsg:2782"))
+proj4string(listings_homes_proj)
+
+plot(listings_homes_proj)
+```
+```{r}
+bnb_hawaii_proj <- spTransform(bnb_hawaii, CRS(proj4string(listings_homes_proj))) 
+proj4string(bnb_hawaii_proj)
+
+plot(bnb_hawaii_proj)
+plot(listings_homes_proj, col="red", add=TRUE)
+```
+
+### Apply spatial interpolation methods to estimate the price (per night) for the same room type you mapped out.
+
+Trend Surface Analysis:
+```{r}
+P <- listings_homes_proj
+W <- bnb_hawaii_proj
+
+P@bbox <- W@bbox
+
+tm_shape(W) + tm_polygons() +
+  tm_shape(P) +
+  tm_dots(col="price", palette = "RdBu", auto.palette.mapping = FALSE, breaks = c(0, 100, 200, 300, 400, Inf),
+          title="Price per night", size=0.7) +
+  #tm_text("price", just="left", xmod=.5, size = 0.7) +
+  tm_legend(legend.outside=TRUE)
+
+grd              <- as.data.frame(spsample(P, "regular", n=50000))
+names(grd)       <- c("X", "Y")
+coordinates(grd) <- c("X", "Y")
+gridded(grd)     <- TRUE  # Create SpatialPixel object
+fullgrid(grd)    <- TRUE  # Create SpatialGrid object
+
+proj4string(grd) <- proj4string(P)
+
+f.1 <- as.formula(price ~ X + Y) 
+
+P$X <- coordinates(P)[,1]
+P$Y <- coordinates(P)[,2]
+```
+
+It seems that a majority of affordable AirBNB listings for entire homes are near Hilo, which is good news since that's where I was most interested in going if I do our honeymoon in Hawaii. I was hoping to visit Kona as well since both cities are on the Big Island, however there's a large cluster of more-expensive stays in Kona. We may have to consider a private room instead of a house if we decide to go to Kona. 
+
+Predicting house prices:
+```{r}
+# Run the regression model
+lm.1 <- lm( f.1, data=P)
+
+# Use the regression model output to interpolate the surface
+dat.1st <- SpatialGridDataFrame(grd, data.frame(var1.pred = predict(lm.1, newdata=grd)))
+
+library(raster)
+r   <- raster(dat.1st)
+r.m <- mask(r, W)
+
+tm_shape(r.m) + 
+  tm_raster(n=5, palette="RdBu",breaks=c(0, 100, 200, 300, 400, Inf), 
+            title="Predicted prices") +
+  tm_shape(P) + tm_dots(size=0.2) +
+  tm_legend(legend.outside=TRUE)
+```
+
+I don't like how this visualization presents as much since it seems cluttered. It seems to be predicting prices by each individual island, so by accounting for all the data available it's showing a prediction of much more expensive options to be anticipated. Not surprisingly, the island where Honolulu is located seems to show as the most expensive per night.
+
+### Estimate a global multiple linear regression models to predict price per night. Discuss your model.
+
+Assessing pricing stats:
+```{r}
+mean(listings_homes_proj$price) #global mean price
+sd(listings_homes_proj$price) #global standard deviation
+
+localstats1 <- gwss(listings_homes_proj, vars = c("price",
+                                          "minimum_nights"), bw=50000)
+```
+I decided to look at this as price by minimum nights required as a predictor:
+```{r}
+head(data.frame(localstats1$SDF))
+```
+```{r}
+plot.new()
+quick.map <- function(spdf,var,legend.title,main.title) {
+  x <- spdf@data[,var]
+  cut.vals <- pretty(x)
+  x.cut <- cut(x,cut.vals)
+  cut.levels <- levels(x.cut)
+  cut.band <- match(x.cut,cut.levels)
+  colors <- brewer.pal(length(cut.levels),'Reds')
+  par(mar=c(1,1,1,1))
+  plot(listings_homes_proj,col='grey85')
+  #title(main.title)
+  plot(spdf,add=TRUE,col=colors[cut.band],pch=16)
+  legend('topleft',cut.levels,col=colors,pch=16,bty='n',title=legend.title)
+}
+
+plot.new()
+par(mfrow=c(1,2))
+quick.map(localstats1$SDF, "price_LM", "Geographically Weighted Mean")
+
+quick.map(localstats1$SDF, "price_LSD","Local Standard Deviation")
+```
+```{r}
+gwr.res <- gwr.basic(price~minimum_nights,
+                     data=listings_homes_proj,bw=50000, kernel='gaussian')
+gwr.res
+```
+
+My first model really didn't tell me anything. My r squared and p values are extremely low, and AIC scores are very high, which seems to demonstrate that a listing's minimum required # of nights does not really have any predictive properties of price per night. In my second regression, I'll test another numeric variable to try and predict price.
+
+### Examine at least two geographically weighted multiple linear regression models to predict price per night. Discuss your preferred model.
+```{r}
+localstats2 <- gwss(listings_homes_proj, vars = c("price",
+                                          "availability_365"), bw=50000)
+head(data.frame(localstats2$SDF))
+```
+
+```{r}
+gwr.res2 <- gwr.basic(price~availability_365,
+                     data=listings_homes_proj,bw=50000, kernel='gaussian')
+gwr.res2
+```
+
+This was slightly better, but still didn't perform very well. My next logical step would be to evaluate how I can put non-numeric features into the regression, since it seems I may have much better predictors of price in my data than what I've tested.
+```{r}
+quick.map(gwr.res$SDF,"minimum_nights",
+          "Geographically Weighted Regression Coefficient")
+
+quick.map(gwr.res2$SDF,"availability_365",
+          "Geographically Weighted Regression Coefficient")
+```
